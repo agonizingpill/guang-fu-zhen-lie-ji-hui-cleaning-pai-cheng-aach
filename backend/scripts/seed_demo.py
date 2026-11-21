@@ -35,5 +35,51 @@ def seed():
             db.add(mission);db.flush()
         if not db.scalar(select(FollowupSurvey).where(FollowupSurvey.mission_id==mission.id,FollowupSurvey.days_after==2)):
             db.add(FollowupSurvey(mission_id=mission.id,days_after=2,irradiance=800,observed_kw=61,normalized_kw=61,normalized_loss=100/62,state='stable',baseline_snapshot={'post_kw':62,'post_irradiance':800,'accepted_at':mission.accepted_at.isoformat(),'block_id':block.id,'block_code':block.code,'survey_id':historical.id,'survey_code':historical.code,'threshold_pct':5}))
+        seed_metering(db)
         db.commit();print({key:db.scalar(select(func.count()).select_from(model)) for key,model in [('users',User),('blocks',ArrayBlock),('surveys',SoilingSurvey)]})
+
+def seed_metering(db):
+    """分账演示：两组共用总表，26个日窗；SL-A02/SL-C01漏抄走估数，脊西组一条倒挂表底待更正。"""
+    import random,math
+    from datetime import datetime,timedelta
+    from src.generation_models import MeterGroup,MeterGroupMember,MeterReading,GenerationWindow
+    from src.generation_service import recompute_windows
+    blocks={b.code:b for b in db.scalars(select(ArrayBlock)).all()}
+    plan={'MG-SOUTH':('南坡总表',['SL-A01','SL-A02']),'MG-WEST':('脊西总表',['SL-B01','SL-C01'])}
+    miss={'SL-A02':{'2026-11-13','2026-11-14','2026-11-18'},'SL-C01':{'2026-11-08'}}
+    dip={'MG-WEST':23}  # 11-17总表表底少抄45kWh，形成倒挂窗与异常挂账，供更正演示
+    base=datetime(2026,11,20,18)
+    starts=[base-timedelta(days=26-i) for i in range(27)]
+    for code,(name,codes) in plan.items():
+        if db.scalar(select(MeterGroup).where(MeterGroup.code==code)):continue
+        group=MeterGroup(code=code,name=name);db.add(group);db.flush()
+        members=[blocks[c] for c in codes]
+        for b in members:db.add(MeterGroupMember(group_id=group.id,block_id=b.id))
+        rng=random.Random(20261120+group.id)
+        daily={}
+        for b in members:
+            brng=random.Random(91000+b.id)
+            daily[b.id]=[round(b.capacity_kw*(3.8+0.6*math.sin(2*math.pi*(starts[j+1].timetuple().tm_yday-80)/365)+brng.uniform(-0.35,0.35)),1) for j in range(26)]
+        mdaily=[round(sum(daily[b.id][j] for b in members)*1.003+rng.uniform(-1.5,1.5),1) for j in range(26)]
+        for b in members:
+            cum=5000.0+b.id*137.0
+            for i,t in enumerate(starts):
+                if i>0:cum=round(cum+daily[b.id][i-1],1)
+                if b.code in miss and t.date().isoformat() in miss[b.code]:continue
+                db.add(MeterReading(block_id=b.id,reading_kwh=cum,taken_at=t,note='seed',created_by='seed@qingling.test'))
+        mcum=20000.0+group.id*733.0
+        master_rows=[]
+        for i,t in enumerate(starts):
+            if i>0:mcum=round(mcum+mdaily[i-1],1)
+            master_rows.append(MeterReading(group_id=group.id,reading_kwh=mcum,taken_at=t,note='seed',created_by='seed@qingling.test'))
+        if code in dip:master_rows[dip[code]].reading_kwh=round(master_rows[dip[code]-1].reading_kwh-45.0,1)
+        for r in master_rows:db.add(r)
+        db.flush()
+        prev=None
+        for r in master_rows:
+            if prev:
+                window=GenerationWindow(group_id=group.id,start_reading_id=prev.id,end_reading_id=r.id,start_at=prev.taken_at,end_at=r.taken_at,master_kwh=round(r.reading_kwh-prev.reading_kwh,3))
+                db.add(window);db.flush()
+                recompute_windows(db,[window],'seed@qingling.test','initial')
+            prev=r
 if __name__=='__main__':seed()

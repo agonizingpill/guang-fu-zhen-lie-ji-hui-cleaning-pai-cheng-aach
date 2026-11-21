@@ -106,3 +106,27 @@ MIT，见LICENSE。
 新增代码按实体、输入约束、路由、许可/废水/结算职责及3个页面组织。历史v1与expansion证据保留，第三轮证据在test-artifacts/gb-1024/v3/。作业许可按日容量预留，不模拟逐分钟班次；本地废水联单不接环保系统，合同凭据不触发收付款。
 
 V3 已知范围补充：每任务一张作业许可；撤销为终止办理，需重新创建任务，当前不支持同任务重办许可。草稿许可可在签发前修订；撤销会释放班组容量。
+
+
+## 第四轮扩展：发电量分账
+
+保留原9页，增加“发电量分账”页，共10个业务页面。几块阵列共用一块总表，分表轮次还会漏抄；洗后查发电量时，按总表相邻抄数划出发电窗口，窗内实抄先入账，余量按预测分摊给漏抄阵列，解释不了的差额挂账。
+
+- 分账组 MeterGroup/MeterGroupMember：一个阵列只挂一块总表，分摊才不含糊。表底 MeterReading 按（组，时刻）/（阵列，时刻）唯一，重复提交同刻表底不会重复入账。
+- 划窗：每条新总表抄数与上一条相邻表底关窗（GenerationWindow）；同一轮次抄表允许±2小时时刻偏差。分表在窗口两端都有表底才算抄齐，实抄=端点表底差；缺一端即漏抄。
+- 分摊：余量=总表电量−实抄合计，按预测比例分给漏抄阵列，舍入差并回最大一份，账必须平；没有漏抄或余量为负时，差额直接挂账（suspense不归属阵列）。
+- 预测：只用本组抄齐的窗口训练（待核窗口不用），特征为装机/坡度/面积/窗口时长/月份正余弦，RandomForest 100树 seed42；按窗口结束日期留出约20%报误差，训练MAE与留出MAE分开展示；抄齐样本不足10条退化为装机×时长分摊，并在证据里如实标注。
+- 更正表底：仅主管，需≥5字依据，旧值留痕 ReadingCorrection。两侧窗口一起重算；任一窗口倒挂（总表或分表电量为负）则两侧一起撤账待核（pending_review），在账分录全部冲回保留痕迹；复核重算或再次更正后恢复入账。
+- 晚到分表：按真实抄表时刻补录，波及窗口（结束时刻不早于该时刻的在账窗口）冲回估数再补记；每窗入账依据指纹（token）不变则跳过，重试与重放不重复入账。
+- 阵列台账：阵列页面可查各窗实抄、估数、组级挂账与总表对账差（GET /generation/arrays/{id}/ledger）。
+
+接口：GET/POST /generation/groups（建组仅主管）、GET /generation/readings、POST /generation/readings/master 与 /generation/readings/array（计划员/主管）、POST /generation/readings/{id}/correct（仅主管）、GET /generation/windows、POST /generation/windows/{id}/recompute（仅主管）、GET /generation/arrays/{id}/ledger。
+
+seed新增两组：MG-SOUTH（SL-A01/SL-A02）、MG-WEST（SL-B01/SL-C01），2026-10-25至11-20每日18:00表底共52窗。SL-A02漏抄11-13/11-14/11-18、SL-C01漏抄11-08走估数；脊西组11-17总表表底少抄45kWh，形成倒挂窗（撤账待核）与邻窗约629.5kWh异常挂账。seed按自然键只补缺项，不覆盖人工改动。
+
+演示续篇（全新seed环境数值）：
+1. 计划员补录 SL-A02 分表 2026-11-18T18:00 = 14848.6 kWh → 23、24两窗冲回估数改实抄，25窗依据不变自动跳过；再补 11-13 = 12866.8、11-14 = 13300.7，估数窗逐窗补齐。
+2. 主管在“更正表底”选 MG-WEST 11-17 18:00 总表表底（34872.2），更正为 35500.1 → 倒挂窗与邻窗一起重算，待核窗恢复入账，异常挂账消失；反向把表底改小可演示两侧一起撤账待核。
+3. 观察员在“阵列分窗台账”核对各窗实抄/估数/挂账与总表对账差。
+
+新增代码：generation_models.py（7表）、generation_core.py（划窗/分摊纯逻辑，无数据库依赖）、generation_model.py（按日留出训练）、generation_schemas.py、generation_service.py、generation_routes.py、frontend pages/metering.js。纯逻辑离线核对脚本在 test-artifacts/gb-1024/metering/。

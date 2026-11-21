@@ -18,3 +18,10 @@ class MissionState(StrEnum):
     RETESTED='retested'
     ACCEPTED='accepted'
     SUPERSEDED='superseded'
+class WindowState(StrEnum):
+    ALLOCATED='allocated'
+    PENDING_REVIEW='pending_review'
+class EntryKind(StrEnum):
+    ACTUAL='actual'
+    ESTIMATE='estimate'
+    SUSPENSE='suspense'
